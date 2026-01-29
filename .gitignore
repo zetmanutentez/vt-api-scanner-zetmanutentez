@@ -1,0 +1,16 @@
+# --- Secrets / config (NUNCA versionar) ---
+.vt_scanner.json
+*.vt_scanner.json
+*.secret
+*.secrets
+*.key
+*.apikey
+*.token
+
+# --- Reports/output (não versionar) ---
+VT_Reports/
+**/VT_Reports/
+
+# --- OS/Editor ---
+Thumbs.db
+.DS_Store
