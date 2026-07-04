@@ -1,5 +1,5 @@
 # ============================================
-# VirusTotal Interactive Scanner v1.2.3
+# VirusTotal Interactive Scanner v1.2.4
 # Standalone / Non-Admin | Proxy Auto-Detect | UX 0/X
 # Autor: Zet
 # ============================================
@@ -123,7 +123,52 @@ function Invoke-VTRequest {
     if ($ProxyUri) { $params.Proxy = $ProxyUri.AbsoluteUri }
 
     $script:LastRequestAt = Get-Date
-    return Invoke-RestMethod @params
+
+    try {
+        return Invoke-RestMethod @params
+    }
+    catch {
+        $message = $_.Exception.Message
+        $statusCode = $null
+        $errorBody = $null
+
+        if ($_.Exception.Response) {
+            try {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            } catch { }
+
+            try {
+                $stream = $_.Exception.Response.GetResponseStream()
+                if ($stream) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $errorBody = $reader.ReadToEnd()
+                    $reader.Dispose()
+                }
+            } catch { }
+        }
+
+        if ($errorBody) {
+            try {
+                $vtError = $errorBody | ConvertFrom-Json
+                if ($vtError.error.message) { $message = $vtError.error.message }
+                if ($vtError.error.code) { $message = "$($vtError.error.code): $message" }
+            } catch {
+                $message = $errorBody
+            }
+        }
+
+        if ($statusCode -eq 404) {
+            throw "Artefacto não encontrado no VirusTotal. Isto não prova que é seguro; significa apenas que não há registo público para este valor."
+        }
+        if ($statusCode -eq 401 -or $statusCode -eq 403) {
+            throw "A API key foi recusada pelo VirusTotal. Confirme se a variável VT_APIKEY está correta e se a quota/permissão está ativa."
+        }
+        if ($statusCode -eq 429) {
+            throw "Quota/rate limit do VirusTotal atingido. Aguarde alguns minutos e tente novamente."
+        }
+
+        throw $message
+    }
 }
 
 function Get-CategoriesString {
@@ -139,12 +184,41 @@ function Get-CategoriesString {
     }
 }
 
+function Get-ObjectIntProperty {
+    param(
+        [Parameter(Mandatory)]$InputObject,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    try {
+        $prop = $InputObject.PSObject.Properties[$Name]
+        if ($prop -and $null -ne $prop.Value) { return [int]$prop.Value }
+    } catch { }
+
+    return 0
+}
+
+function Get-ObjectPropertyValue {
+    param(
+        [Parameter(Mandatory)]$InputObject,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    try {
+        if ($null -eq $InputObject) { return $null }
+        $prop = $InputObject.PSObject.Properties[$Name]
+        if ($prop) { return $prop.Value }
+    } catch { }
+
+    return $null
+}
+
 function Get-EngineTotals {
     param($Stats)
-    $m = [int]($Stats.malicious  ?? 0)
-    $s = [int]($Stats.suspicious ?? 0)
-    $h = [int]($Stats.harmless  ?? 0)
-    $u = [int]($Stats.undetected ?? 0)
+    $m = Get-ObjectIntProperty -InputObject $Stats -Name "malicious"
+    $s = Get-ObjectIntProperty -InputObject $Stats -Name "suspicious"
+    $h = Get-ObjectIntProperty -InputObject $Stats -Name "harmless"
+    $u = Get-ObjectIntProperty -InputObject $Stats -Name "undetected"
     $total = $m + $s + $h + $u
     [pscustomobject]@{
         Malicious  = $m
@@ -213,6 +287,30 @@ Conclusão:
 "@
     }
 
+    if ($t.Malicious -eq 0 -and $t.Suspicious -eq 0 -and $t.Harmless -ge 10) {
+        return @"
+**Análise de segurança (VirusTotal) — RESULTADO: BAIXO RISCO / SEM DETEÇÕES**
+
+Artefacto: $Type
+Valor: $Artifact
+
+Deteções (motores VT):
+- Malicioso: 0
+- Suspeito:  0
+- Limpo:     $($t.Harmless)
+- Indet.:    $($t.Undetected)
+$(if($cats){ "`nCategorias/Reputação (quando disponíveis): $cats" } else { "" })
+
+Conclusão:
+- O VirusTotal não apresentou deteções maliciosas ou suspeitas.
+- O artefacto pode ser tratado como baixo risco, desde que o contexto do e-mail/remetente também seja legítimo.
+
+Recomendação:
+- Pode ser desbloqueado se não houver outros sinais suspeitos no e-mail.
+- Manter atenção a pedidos de credenciais, pagamentos, urgência incomum ou anexos inesperados.
+"@
+    }
+
     if ($weakReputation) {
         return @"
 **Análise de segurança (VirusTotal) — RESULTADO: INCONCLUSIVO / NÃO DESBLOQUEAR POR PRECAUÇÃO**
@@ -274,11 +372,22 @@ function Wait-VTAnalysis {
 
 function Scan-Hash {
     param([Parameter(Mandatory)][string]$Hash)
+    if ($Hash -notmatch '^(?i)([a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})$') {
+        throw "Hash inválido. Use MD5 (32), SHA1 (40) ou SHA256 (64) em hexadecimal."
+    }
     Invoke-VTRequest -Method GET -Uri "https://www.virustotal.com/api/v3/files/$Hash" -Headers $Headers
 }
 
 function Scan-URL {
     param([Parameter(Mandatory)][string]$UrlToScan)
+    try {
+        $parsedUrl = [Uri]$UrlToScan
+        if (-not $parsedUrl.IsAbsoluteUri -or $parsedUrl.Scheme -notin @("http","https")) {
+            throw
+        }
+    } catch {
+        throw "URL inválida. Use uma URL completa iniciada por http:// ou https://."
+    }
     $analysis = Invoke-VTRequest -Method POST -Uri "https://www.virustotal.com/api/v3/urls" -Headers $Headers -Body @{ url = $UrlToScan } -ContentType "application/x-www-form-urlencoded"
     Wait-VTAnalysis -AnalysisId $analysis.data.id
 }
@@ -335,11 +444,18 @@ function Scan-File {
 
 function Scan-Domain {
     param([Parameter(Mandatory)][string]$Domain)
+    if ($Domain -notmatch '^(?i)([a-z0-9-]+\.)+[a-z]{2,}$') {
+        throw "Domínio inválido. Exemplo válido: exemplo.pt"
+    }
     Invoke-VTRequest -Method GET -Uri "https://www.virustotal.com/api/v3/domains/$Domain" -Headers $Headers
 }
 
 function Scan-IP {
     param([Parameter(Mandatory)][string]$IP)
+    $parsedIp = $null
+    if (-not [System.Net.IPAddress]::TryParse($IP, [ref]$parsedIp)) {
+        throw "Endereço IP inválido."
+    }
     Invoke-VTRequest -Method GET -Uri "https://www.virustotal.com/api/v3/ip_addresses/$IP" -Headers $Headers
 }
 
@@ -347,14 +463,16 @@ function Extract-StatsAndCategories {
     param($Result, [string]$Type)
 
     if ($Type -in @("url","file")) {
-        $stats = $Result.data.attributes.stats
-        if (-not $stats) { $stats = $Result.data.attributes.last_analysis_stats }
-        $categories = $Result.data.attributes.categories
+        $stats = Get-ObjectPropertyValue -InputObject $Result.data.attributes -Name "stats"
+        if (-not $stats) {
+            $stats = Get-ObjectPropertyValue -InputObject $Result.data.attributes -Name "last_analysis_stats"
+        }
+        $categories = Get-ObjectPropertyValue -InputObject $Result.data.attributes -Name "categories"
         return ,@($stats, $categories)
     }
 
-    $stats = $Result.data.attributes.last_analysis_stats
-    $categories = $Result.data.attributes.categories
+    $stats = Get-ObjectPropertyValue -InputObject $Result.data.attributes -Name "last_analysis_stats"
+    $categories = Get-ObjectPropertyValue -InputObject $Result.data.attributes -Name "categories"
     return ,@($stats, $categories)
 }
 
@@ -416,7 +534,7 @@ function Show-Result {
 # ---------- MENU ----------
 :MAIN while ($true) {
     Clear-Host
-    Write-Host "=== VirusTotal Scanner Interativo v1.2.3 (Standalone / Non-Admin) ===" -ForegroundColor Green
+    Write-Host "=== VirusTotal Scanner Interativo v1.2.4 (Standalone / Non-Admin) ===" -ForegroundColor Green
     Write-Host ""
 
     Write-Host "1 - Analisar URL"
@@ -463,9 +581,8 @@ function Show-Result {
             }
             "X" {
                 Write-Host ""
-                Write-Host "A fechar o PowerShell..." -ForegroundColor Yellow
-                Start-Sleep -Seconds 1
-                Stop-Process -Id $PID
+                Write-Host "A sair..." -ForegroundColor Yellow
+                exit
             }
             default {
                 Write-Host "Opção inválida." -ForegroundColor Yellow
