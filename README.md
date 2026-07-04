@@ -27,6 +27,10 @@ e segmentação de rede.
 - PowerShell 5.1 ou superior (recomendado PowerShell 7)
 - Chave de API VirusTotal (plano público)
 
+> Nota: a API pública/free do VirusTotal possui limites e restrições de uso.
+> Para fluxos empresariais, comerciais ou de produção, valide licenciamento,
+> privacidade e políticas internas antes de integrar a ferramenta no processo.
+
 ---
 
 ## Configuração (sem privilégios administrativos)
@@ -54,6 +58,19 @@ Conteúdo:
 - Nenhuma credencial embutida no código
 - Relatórios locais por utilizador
 - Compatível com ambientes com inspeção HTTPS
+- Não enviar ficheiros com dados pessoais/sensíveis ao VirusTotal sem aprovação
+  interna, pois amostras submetidas podem ser partilhadas com a comunidade de
+  segurança conforme os termos do serviço.
+
+---
+
+## Alterações recentes
+
+### v1.2.4
+- Compatibilidade melhorada com PowerShell 5.1
+- Mensagens mais claras para erros da API VirusTotal
+- Validação básica de URL, hash, domínio e IP
+- Saída do script sem forçar o fecho do PowerShell
 
 ---
 
